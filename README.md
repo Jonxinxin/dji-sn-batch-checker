@@ -37,7 +37,7 @@
 
 本项目暂未发布到 Chrome Web Store，需要通过开发者模式安装。
 
-1. 下载仓库代码并解压。
+1. 从 [Releases](https://github.com/Jonxinxin/dji-sn-batch-checker/releases/latest) 下载最新版 ZIP 并解压；也可以使用仓库的 **Code → Download ZIP**。
 2. 打开浏览器扩展管理页：
    - Chrome：`chrome://extensions`
    - Edge：`edge://extensions`
