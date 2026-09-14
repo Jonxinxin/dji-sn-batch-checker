@@ -15,12 +15,12 @@ assert.equal(activated.product, "DJI Mini 4 Pro");
 assert.equal(activated.activationTime, "2025-06-18 09:30:12");
 
 const screenshotResult = core.classifyResult(
-  "设备信息查询\n查看设备的激活时间和增值服务信息，并了解购买资格。\nOsmo Pocket 3\n序列号：5WTXP4N0000000\n激活时间：2026-06-27"
+  "设备信息查询\n查看设备的激活时间和增值服务信息，并了解购买资格。\nOsmo Pocket 3\n序列号：5WTXP4N002J472\n激活时间：2026-06-27"
 );
 assert.equal(screenshotResult.status, "activated");
 assert.equal(screenshotResult.product, "Osmo Pocket 3");
 assert.equal(screenshotResult.activationTime, "2026-06-27");
-assert.equal(core.hasConcreteResult(screenshotResult.details, "5WTXP4N0000000"), true);
+assert.equal(core.hasConcreteResult(screenshotResult.details, "5WTXP4N002J472"), true);
 assert.equal(core.hasConcreteResult(screenshotResult.details, "DIFFERENT-SN"), false);
 assert.equal(core.hasConcreteResult("查看设备的激活时间和增值服务信息", ""), false);
 

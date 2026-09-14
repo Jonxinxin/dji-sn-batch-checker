@@ -4,6 +4,7 @@
   if (document.getElementById("dji-sn-batch-checker-host")) return;
 
   const core = globalThis.DJISNCore;
+  const slider = globalThis.DJISNSlider;
   const STORAGE_KEY = "djiSnBatchCheckerStateV1";
   const QUERY_URL = "https://repair.dji.com/device/detail?re=cn&lang=zh-CN";
   const STATUS_LABELS = {
@@ -35,13 +36,21 @@
     running: false,
     collapsed: false,
     importText: "",
-    autoAdvance: true
+    autoAdvance: true,
+    autoSlider: true
   };
   let observerTimer = 0;
   let toastTimer = 0;
   let navigationTimer = 0;
   let autoAdvanceTimer = 0;
   let lastAutoSubmittedId = "";
+  let sliderTimer = 0;
+  let activeSliderAttempt = null;
+  let sliderHandledItemId = "";
+  let sliderWaitStartedAt = 0;
+  let lastFilledItemId = "";
+  let stateLoaded = false;
+  let restoringItemId = "";
 
   const icons = {
     minimize: '<svg class="sn-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>',
@@ -132,12 +141,125 @@
     const item = getCurrent();
     const input = officialInput();
     if (!item || !input) return false;
-    lastAutoSubmittedId = "";
-    setNativeInputValue(input, item.sn);
-    if (item.status === "pending") patchItem(item.id, { status: "ready", message: "等待手动完成滑块验证" });
-    input.scrollIntoView({ block: "center", behavior: "smooth" });
+    if (lastFilledItemId !== item.id || core.normalizeSn(input.value) !== item.sn) {
+      cancelAutoSlider(true);
+      lastAutoSubmittedId = "";
+      sliderWaitStartedAt = Date.now();
+      lastFilledItemId = item.id;
+    }
+    if (input.value !== item.sn) setNativeInputValue(input, item.sn);
+    if (item.status === "pending") patchItem(item.id, {
+      status: "ready", message: state.autoSlider ? "等待自动完成滑块验证" : "等待手动完成滑块验证"
+    });
+    input.scrollIntoView({ block: "center", behavior: "auto" });
     input.focus({ preventScroll: true });
+    scheduleAutoSlider();
     return true;
+  }
+
+  function sendSliderCancel(attempt) {
+    try {
+      chrome.runtime.sendMessage({ type: "DJI_SLIDER_CANCEL", requestId: attempt.requestId }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch (_) { /* The extension may have been reloaded. */ }
+  }
+
+  function cancelAutoSlider(resetHandled = false) {
+    clearTimeout(sliderTimer);
+    const attempt = activeSliderAttempt;
+    activeSliderAttempt = null;
+    if (attempt) sendSliderCancel(attempt);
+    if (resetHandled) sliderHandledItemId = "";
+  }
+
+  function stopPendingAutomation() {
+    restoringItemId = "";
+    clearTimeout(autoAdvanceTimer);
+    clearInterval(navigationTimer);
+    cancelAutoSlider(true);
+  }
+
+  function scheduleAutoSlider(delay = 650) {
+    clearTimeout(sliderTimer);
+    sliderTimer = window.setTimeout(tryAutoSlider, delay);
+  }
+
+  function requestSlider(attempt) {
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        sendSliderCancel(attempt);
+        reject(new Error("自动滑块响应超时，请手动完成或重试"));
+      }, 26000);
+      try {
+        chrome.runtime.sendMessage({ type: "DJI_SLIDER_SOLVE", requestId: attempt.requestId, sn: attempt.sn }, (response) => {
+          clearTimeout(timer);
+          const error = chrome.runtime.lastError;
+          if (error) reject(new Error("自动滑块连接不可用，请重新加载扩展并刷新官网页面"));
+          else resolve(response || { ok: false, message: "自动滑块未返回结果" });
+        });
+      } catch (error) {
+        clearTimeout(timer);
+        reject(error);
+      }
+    });
+  }
+
+  async function tryAutoSlider() {
+    const item = getCurrent();
+    if (!stateLoaded || !state.running || !state.autoSlider || !item || item.status !== "ready"
+      || activeSliderAttempt || sliderHandledItemId === item.id || lastFilledItemId !== item.id) return;
+    const input = officialInput();
+    if (!input || core.normalizeSn(input.value) !== item.sn) return;
+    const snapshot = slider.inspect();
+    if (snapshot.kind === "passed") {
+      autoSubmitAfterVerification();
+      return;
+    }
+    if (["missing", "loading"].includes(snapshot.kind) && Date.now() - sliderWaitStartedAt < 15000) return;
+    sliderHandledItemId = item.id;
+    if (snapshot.kind !== "slider") {
+      patchItem(item.id, { message: snapshot.message || "未找到可自动操作的滑块，请手动完成" });
+      return;
+    }
+
+    const attempt = { requestId: uid(), itemId: item.id, sn: item.sn };
+    activeSliderAttempt = attempt;
+    patchItem(item.id, { message: "正在自动完成滑块验证…" });
+    let response;
+    try {
+      response = await requestSlider(attempt);
+    } catch (error) {
+      sendSliderCancel(attempt);
+      response = { ok: false, message: error.message };
+    }
+    // A pause, removal, manual query, or a new SN invalidates this result.
+    if (activeSliderAttempt !== attempt) return;
+    activeSliderAttempt = null;
+    const current = getCurrent();
+    if (!current || current.id !== item.id || current.status !== "ready" || !state.running) return;
+    if (response.ok && verificationPassed()) {
+      patchItem(item.id, { message: state.autoAdvance ? "滑块已通过，等待官网查询" : "滑块已通过，请点击官网“查询”" });
+      autoSubmitAfterVerification();
+    } else {
+      const reason = response.message || "官网尚未确认验证通过";
+      patchItem(item.id, { message: `${reason}；可手动完成后继续` });
+      showToast("自动滑块未完成，可重试或手动拖动", "error");
+    }
+  }
+
+  function retrySlider() {
+    const item = getCurrent();
+    if (!item || item.status !== "ready" || activeSliderAttempt) return;
+    const snapshot = slider.inspect();
+    if (snapshot.kind === "failed") {
+      // The Aliyun failure text is also its official refresh control.
+      const refresh = document.getElementById("aliyunCaptcha-sliding-text");
+      if (refresh) refresh.click();
+    }
+    sliderHandledItemId = "";
+    sliderWaitStartedAt = Date.now();
+    scheduleAutoSlider();
   }
 
   function pageResultText() {
@@ -186,6 +308,7 @@
     }
     const parsed = core.classifyResult(text);
     const shouldAdvance = state.running && state.autoAdvance && parsed.status !== "unknown";
+    cancelAutoSlider();
     patchItem(item.id, {
       ...parsed,
       checkedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
@@ -199,29 +322,23 @@
       : shouldAdvance ? "结果已记录，正在进入下一条" : "查询结果已记录");
     if (shouldAdvance) {
       clearTimeout(autoAdvanceTimer);
-      autoAdvanceTimer = window.setTimeout(() => moveNext(false), 900);
+      autoAdvanceTimer = window.setTimeout(() => {
+        if (state.running && state.autoAdvance && state.currentId === item.id) moveNext(false);
+      }, 900);
     }
     return true;
   }
 
   function verificationPassed() {
-    const selectors = [
-      ".deviceActiveCode",
-      "[id*='captcha']",
-      "[class*='captcha']",
-      "[class*='verify']"
-    ];
-    for (const selector of selectors) {
-      for (const element of Array.from(document.querySelectorAll(selector)).slice(0, 20)) {
-        if (/验证通过|验证成功|校验通过|校验成功/.test(element.innerText || element.textContent || "")) return true;
-      }
-    }
-    return /验证通过|验证成功|校验通过|校验成功/.test(document.body ? document.body.innerText : "");
+    return slider.inspect().kind === "passed";
   }
 
   function autoSubmitAfterVerification() {
     const item = getCurrent();
     if (!state.running || !state.autoAdvance || !item || item.status !== "ready") return false;
+    if (activeSliderAttempt) return false;
+    const input = officialInput();
+    if (!input || core.normalizeSn(input.value) !== item.sn) return false;
     if (lastAutoSubmittedId === item.id || !verificationPassed()) return false;
     const button = officialQueryButton();
     if (!button || button.disabled) return false;
@@ -249,6 +366,7 @@
       details: message,
       checkedAt: new Date().toLocaleString("zh-CN", { hour12: false })
     });
+    stopPendingAutomation();
     state.running = false;
     saveState();
     render();
@@ -256,24 +374,67 @@
     return true;
   }
 
+  function restoreQueuedItem() {
+    const item = getCurrent();
+    if (!state.running || !item || item.id !== restoringItemId) {
+      restoringItemId = "";
+      return;
+    }
+    if (item.status === "querying" && captureResult(false)) {
+      restoringItemId = "";
+      return;
+    }
+    if (core.isFinalStatus(item.status)) {
+      // A reload may happen between saving the result and advancing. Wait
+      // for the site to render before trying to return to its query form.
+      if (!officialInput() && !pageResultText()) return;
+      restoringItemId = "";
+      if (state.autoAdvance) moveNext(false);
+      else pauseQueue();
+    } else if (officialInput()) {
+      restoringItemId = "";
+      // A full reload loses an in-flight query. The visible form needs a
+      // fresh verification, even if the saved item still says querying.
+      if (item.status === "querying") patchItem(item.id, { status: "pending" });
+      fillCurrentSn();
+    }
+  }
+
+  function checkPage() {
+    if (!stateLoaded) return;
+    if (restoringItemId) {
+      restoreQueuedItem();
+      if (restoringItemId) return;
+    }
+    if (detectError()) return;
+    const item = getCurrent();
+    if (item && item.status === "querying" && captureResult(false)) return;
+    if (!autoSubmitAfterVerification()) tryAutoSlider();
+  }
+
   function observePage() {
     const observer = new MutationObserver(() => {
       clearTimeout(observerTimer);
-      observerTimer = window.setTimeout(() => {
-        if (detectError()) return;
-        const item = getCurrent();
-        if (item && item.status === "querying" && captureResult(false)) return;
-        autoSubmitAfterVerification();
-      }, 450);
+      observerTimer = window.setTimeout(checkPage, 450);
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true,
+      attributes: true, attributeFilter: ["class", "style", "disabled", "aria-disabled", "aria-hidden"] });
+    // Covers SDK transitions that do not add DOM nodes, and delayed page loads.
+    window.setInterval(checkPage, 1000);
   }
 
   function handleOfficialQueryClick(event) {
     const button = event.target.closest && event.target.closest("button");
-    if (!button || button !== officialQueryButton()) return;
+    if (!button || button !== officialQueryButton() || button.disabled) return;
     const item = getCurrent();
     if (!item) return;
+    const input = officialInput();
+    if (!input || core.normalizeSn(input.value) !== item.sn) {
+      pauseQueue();
+      showToast("官网输入的 SN 与当前队列不一致，队列已暂停", "error");
+      return;
+    }
+    cancelAutoSlider();
     lastAutoSubmittedId = item.id;
     patchItem(item.id, { status: "querying", message: "正在等待官网返回结果" });
   }
@@ -302,6 +463,7 @@
       showToast("没有待查询的 SN");
       return;
     }
+    stopPendingAutomation();
     state.currentId = item.id;
     state.running = true;
     saveState();
@@ -310,7 +472,10 @@
   }
 
   function pauseQueue() {
+    stopPendingAutomation();
     state.running = false;
+    const item = getCurrent();
+    if (item && item.status === "ready") item.message = "已暂停，继续后可重新尝试滑块验证";
     saveState();
     render();
   }
@@ -324,7 +489,12 @@
       else history.back();
     }
     let attempts = 0;
+    const navigatingId = state.currentId;
     navigationTimer = window.setInterval(() => {
+      if (!state.running || state.currentId !== navigatingId) {
+        clearInterval(navigationTimer);
+        return;
+      }
       attempts += 1;
       if (fillCurrentSn()) {
         clearInterval(navigationTimer);
@@ -336,6 +506,7 @@
   }
 
   function moveNext(skipCurrent = false) {
+    stopPendingAutomation();
     const current = getCurrent();
     if (current && skipCurrent && !core.isFinalStatus(current.status)) {
       patchItem(current.id, { status: "skipped", message: "用户跳过" });
@@ -356,6 +527,7 @@
   }
 
   function retryItem(id) {
+    stopPendingAutomation();
     state.items = state.items.map((item) => item.id === id ? {
       ...item,
       status: "pending",
@@ -373,6 +545,10 @@
   }
 
   function removeItem(id) {
+    if (state.currentId === id) {
+      stopPendingAutomation();
+      state.running = false;
+    }
     state.items = state.items.filter((item) => item.id !== id);
     if (state.currentId === id) state.currentId = null;
     saveState();
@@ -381,7 +557,11 @@
 
   function clearCompleted() {
     state.items = state.items.filter((item) => !core.isFinalStatus(item.status));
-    if (!state.items.some((item) => item.id === state.currentId)) state.currentId = null;
+    if (!state.items.some((item) => item.id === state.currentId)) {
+      stopPendingAutomation();
+      state.currentId = null;
+      state.running = false;
+    }
     saveState();
     render();
   }
@@ -389,6 +569,8 @@
   function setManualStatus(status) {
     const item = getCurrent();
     if (!item) return;
+    stopPendingAutomation();
+    state.running = false;
     const details = pageResultText() || item.details || "人工确认";
     patchItem(item.id, {
       status,
@@ -459,7 +641,7 @@
       </button>
       <section class="sn-panel" aria-label="SN 批量激活查询助手" ${state.collapsed ? "hidden" : ""}>
         <header class="sn-header">
-          <div class="sn-title"><h2>SN 批量激活查询</h2><p>人工滑块验证 · 本地保存结果</p></div>
+          <div class="sn-title"><h2>SN 批量激活查询</h2><p>${state.autoSlider ? "自动滑块验证" : "人工滑块验证"} · 本地保存结果</p></div>
           <button class="sn-icon-btn" type="button" data-action="collapse" title="收起面板" aria-label="收起面板">${icons.minimize}</button>
         </header>
         <div class="sn-summary" aria-label="查询汇总">
@@ -486,12 +668,23 @@
           </div>
           <div class="sn-steps">
             <div class="sn-step"><span class="sn-step-index">1</span><span>点击开始后，SN 会自动填入大疆输入框</span></div>
-            <div class="sn-step"><span class="sn-step-index">2</span><span>${state.autoAdvance ? "手动拖动滑块，验证通过后自动查询" : "手动拖动滑块，再点击官网“查询”"}</span></div>
+            <div class="sn-step"><span class="sn-step-index">2</span><span>${state.autoSlider
+              ? (state.autoAdvance ? "自动完成滑块，验证通过后自动查询" : "自动完成滑块，再点击官网“查询”")
+              : (state.autoAdvance ? "手动拖动滑块，验证通过后自动查询" : "手动拖动滑块，再点击官网“查询”")}</span></div>
           </div>
+          <label class="sn-auto-option">
+            <input type="checkbox" data-auto-slider ${state.autoSlider ? "checked" : ""}>
+            <span>自动完成滑块验证</span>
+          </label>
           <label class="sn-auto-option">
             <input type="checkbox" data-auto-advance ${state.autoAdvance ? "checked" : ""}>
             <span>验证后自动查询、记录并进入下一条</span>
           </label>
+          ${current && current.status === "ready" ? `<div class="sn-verification" role="status" aria-live="polite">
+            <span>${escapeHtml(current.message || "等待滑块验证")}</span>
+            ${state.autoSlider && state.running && !activeSliderAttempt && sliderHandledItemId === current.id && !verificationPassed()
+              ? '<button class="sn-link-button" type="button" data-action="retry-slider">重试滑块</button>' : ""}
+          </div>` : ""}
           <div class="sn-row">
             <button class="sn-button primary" type="button" data-action="${state.running ? "pause" : "start"}" ${state.items.length ? "" : "disabled"}>${state.running ? icons.pause + "暂停" : icons.play + "开始查询"}</button>
             <button class="sn-button" type="button" data-action="capture" ${current ? "" : "disabled"}>${icons.capture}记录当前页</button>
@@ -504,7 +697,7 @@
           <div class="sn-list">${state.items.length ? state.items.map(renderItem).join("") : '<div class="sn-empty">先粘贴一批 SN 加入队列。<br>查询结果会保存在这里。</div>'}</div>
         </section>
         <footer class="sn-footer">
-          <div class="sn-footer-note">${state.autoAdvance ? "滑块需人工完成；其余步骤自动执行" : "当前为逐条人工确认模式"}</div>
+          <div class="sn-footer-note">${state.autoSlider ? "自动验证失败时，可手动拖动后继续" : state.autoAdvance ? "滑块需人工完成；其余步骤自动执行" : "当前为逐条人工确认模式"}</div>
           <button class="sn-button" type="button" data-action="export" ${state.items.length ? "" : "disabled"}>${icons.download}导出 CSV</button>
         </footer>
       </section>`;
@@ -520,8 +713,20 @@
   shell.addEventListener("change", (event) => {
     if (event.target.matches("[data-auto-advance]")) {
       state.autoAdvance = event.target.checked;
+      if (!state.autoAdvance) clearTimeout(autoAdvanceTimer);
       saveState();
+      render();
       if (state.autoAdvance) autoSubmitAfterVerification();
+    }
+    if (event.target.matches("[data-auto-slider]")) {
+      state.autoSlider = event.target.checked;
+      cancelAutoSlider(true);
+      sliderWaitStartedAt = Date.now();
+      const item = getCurrent();
+      if (item && item.status === "ready") item.message = state.autoSlider ? "等待自动完成滑块验证" : "等待手动完成滑块验证";
+      saveState();
+      render();
+      if (state.autoSlider) scheduleAutoSlider();
     }
   });
 
@@ -542,6 +747,7 @@
     else if (action === "capture") captureResult(true);
     else if (action === "next") moveNext(!getCurrent() || !core.isFinalStatus(getCurrent().status));
     else if (action === "retry") retryItem(button.dataset.id);
+    else if (action === "retry-slider") retrySlider();
     else if (action === "remove") removeItem(button.dataset.id);
     else if (action === "clear-completed") clearCompleted();
     else if (action === "manual-status") setManualStatus(button.dataset.status);
@@ -554,14 +760,14 @@
   });
 
   document.addEventListener("click", handleOfficialQueryClick, true);
+  window.addEventListener("pagehide", () => cancelAutoSlider());
+  window.addEventListener("resize", () => cancelAutoSlider());
   observePage();
 
   loadState().then(() => {
+    restoringItemId = state.running && getCurrent() ? state.currentId : "";
+    stateLoaded = true;
     render();
-    if (state.running && getCurrent()) {
-      window.setTimeout(() => {
-        if (!fillCurrentSn()) captureResult(false);
-      }, 500);
-    }
+    if (restoringItemId) window.setTimeout(checkPage, 500);
   });
 })();

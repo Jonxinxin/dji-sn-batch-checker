@@ -1,14 +1,18 @@
 {
   "manifest_version": 3,
   "name": "DJI SN 批量激活查询助手",
-  "version": "1.1.0",
-  "description": "在大疆设备信息查询页管理 SN 队列、记录激活结果并导出 CSV。滑块验证由用户手动完成。",
-  "permissions": ["storage"],
+  "version": "1.2.0",
+  "minimum_chrome_version": "118",
+  "description": "在大疆设备信息查询页自动操作滑块、管理 SN 队列、记录激活结果并导出 CSV。",
+  "permissions": ["storage", "debugger"],
   "host_permissions": ["https://repair.dji.com/device/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": ["https://repair.dji.com/device/*"],
-      "js": ["core.js", "content.js"],
+      "js": ["core.js", "slider.js", "content.js"],
       "run_at": "document_idle"
     }
   ],

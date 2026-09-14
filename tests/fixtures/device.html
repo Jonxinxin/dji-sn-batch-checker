@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>DJI extension local test fixture</title>
+  <style>
+    body { margin: 0; color: #222; font: 16px "Microsoft YaHei", sans-serif; }
+    header { height: 64px; padding: 0 8%; display: flex; align-items: center; background: #222; color: white; }
+    main { width: 390px; margin: 100px auto; text-align: center; }
+    h1 { font-size: 28px; }
+    input { box-sizing: border-box; width: 100%; height: 48px; padding: 12px; margin: 40px 0 32px; }
+    #aliyunCaptcha-sliding-body { position: relative; height: 48px; background: #f0f0f0; border-radius: 4px; user-select: none; }
+    #aliyunCaptcha-sliding-text { display: block; line-height: 48px; font-size: 13px; }
+    #aliyunCaptcha-sliding-slider { position: absolute; left: 0; top: 0; width: 48px; height: 48px; line-height: 48px; background: white; box-shadow: 0 1px 8px #ddd; cursor: grab; }
+    .btn-step { margin-top: 36px; }
+    button { min-width: 160px; padding: 14px 20px; cursor: pointer; }
+    .detail-wrapper { text-align: left; line-height: 1.8; }
+    .el-message--error { position: fixed; top: 70px; left: 100px; background: #fee; padding: 14px; }
+  </style>
+</head>
+<body>
+  <header>设备信息查询 · 本地测试页面</header>
+  <main class="device-page"></main>
+  <script>
+    (() => {
+      const main = document.querySelector("main");
+      const params = new URLSearchParams(location.search);
+      for (const [key, value] of Object.entries(window.fixtureOptions || {})) params.set(key, String(value));
+      const model = window.fixture = {
+        mode: "pass", passed: false, pressed: false, queries: [], mouse: [], attempts: 0,
+        queryDelay: 60, resultStatus: "activated", error: "",
+        strictEnd: params.has("strictEnd"), authFixture: params.has("authFixture"), returnNewTab: params.has("returnNewTab"),
+        loggedIn: !params.has("authFixture") || document.cookie.split('; ').includes('fixtureLogin=1')
+      };
+      if (model.strictEnd) document.body.style.minHeight = "1100px";
+      let startX = 0;
+      let distance = 0;
+      let handle;
+      let rail;
+
+      model.renderAuth = () => {
+        let auth = document.getElementById('fixture-auth');
+        if (!auth) {
+          auth = document.createElement('div');
+          auth.id = 'fixture-auth';
+          auth.className = 'myCenter';
+          auth.hidden = true;
+          document.body.append(auth);
+        }
+        auth.innerHTML = model.loggedIn ? '<ul><li class="el-dropdown-menu__item">退出登录</li></ul>' : '';
+      };
+      model.login = () => {
+        document.cookie = 'fixtureLogin=1; path=/; max-age=86400; Secure; SameSite=Lax';
+        model.loggedIn = true;
+        model.form();
+      };
+
+      model.verify = () => {
+        model.passed = true;
+        document.getElementById("aliyunCaptcha-sliding-text").textContent = "验证通过";
+      };
+
+      model.reset = () => {
+        model.passed = false;
+        model.pressed = false;
+        if (handle) handle.style.left = "0px";
+        const text = document.getElementById("aliyunCaptcha-sliding-text");
+        if (text) text.textContent = "请按住滑块，拖动到最右边";
+      };
+
+      model.result = (sn) => {
+        if (model.returnNewTab) history.pushState({}, '', '/device/detail' + location.search);
+        if (model.resultStatus === 'login_required') {
+          model.loggedIn = false;
+          document.cookie = 'fixtureLogin=; path=/; max-age=0; Secure';
+        }
+        model.renderAuth();
+        main.innerHTML = '<h1>设备信息查询</h1><div class="detail-wrapper"><div data-product></div><div data-sn></div><div data-activation></div></div><button type="button">查询其他设备</button>';
+        main.querySelector("[data-product]").textContent = "产品名称：DJI Mini 4 Pro";
+        main.querySelector("[data-sn]").textContent = "序列号：" + sn;
+        main.querySelector("[data-activation]").textContent = "激活时间：" + (model.resultStatus === "inactive" ? "--" : "2026-06-27");
+        if (!model.loggedIn) {
+          main.querySelector('[data-activation]').textContent = '激活时间：--';
+          main.querySelector('.detail-wrapper').insertAdjacentHTML('beforeend', '<div class="device-login">登录后查看激活信息</div>');
+        }
+        main.querySelector("button").addEventListener("click", () => {
+          if (model.returnNewTab) window.open('/device/search', '_blank');
+          else model.form();
+        });
+      };
+
+      model.form = () => {
+        model.renderAuth();
+        main.innerHTML = '<h1>设备信息查询</h1><p>查看设备的激活时间和增值服务信息。</p><input placeholder="请输入设备序列号(SN)" maxlength="20"><div id="aliyunCaptcha-sliding-wrapper"><div id="aliyunCaptcha-sliding-body"><span id="aliyunCaptcha-sliding-text">请按住滑块，拖动到最右边</span><div id="aliyunCaptcha-sliding-slider">»</div></div></div><div class="btn-step"><button type="button">查询</button></div>';
+        if (model.authFixture) {
+          const panel = document.createElement('section');
+          panel.dataset.queryPanel = '';
+          panel.append(...main.childNodes);
+          main.append(panel);
+          if (model.loggedIn) {
+            main.insertAdjacentHTML('afterbegin', '<div class="tabs-nav"><button id="tab-1" role="tab" aria-selected="false">通过序列号查询</button><button id="tab-2" role="tab" aria-selected="true">已绑定设备</button></div>');
+            panel.hidden = true;
+            main.querySelector('#tab-1').addEventListener('click', () => {
+              panel.hidden = false;
+              main.querySelector('#tab-1').setAttribute('aria-selected', 'true');
+              main.querySelector('#tab-2').setAttribute('aria-selected', 'false');
+            });
+          } else {
+            main.insertAdjacentHTML('afterbegin', '<div class="device-login"><a id="login" href="https://account.dji.com/login">登录 DJI 账号</a></div>');
+          }
+        }
+        handle = document.getElementById("aliyunCaptcha-sliding-slider");
+        rail = document.getElementById("aliyunCaptcha-sliding-body");
+        model.reset();
+        main.querySelector("input").addEventListener("input", model.reset);
+        document.getElementById("aliyunCaptcha-sliding-text").addEventListener("click", () => {
+          if (/验证失败/.test(document.getElementById("aliyunCaptcha-sliding-text").textContent)) model.reset();
+        });
+        handle.addEventListener("mousedown", (event) => {
+          if (!event.isTrusted || event.button !== 0 || model.passed) return;
+          model.pressed = true;
+          startX = event.clientX;
+          distance = rail.getBoundingClientRect().width - handle.getBoundingClientRect().width;
+          model.attempts += 1;
+          model.mouse.push({ type: "down", trusted: event.isTrusted, x: event.clientX, y: event.clientY, sn: main.querySelector("input").value });
+          event.preventDefault();
+        });
+        main.querySelector(".btn-step button").addEventListener("click", () => {
+          const sn = main.querySelector("input").value;
+          if (!model.passed || model.error) {
+            const message = document.createElement("div");
+            message.className = "el-message--error";
+            message.textContent = model.error || "请完成滑块验证";
+            document.body.append(message);
+            setTimeout(() => message.remove(), 2500);
+            return;
+          }
+          model.queries.push(sn);
+          setTimeout(() => model.result(sn), model.queryDelay);
+        });
+      };
+
+      document.addEventListener("mousemove", (event) => {
+        if (!model.pressed || !event.isTrusted) return;
+        const x = Math.max(0, Math.min(distance, event.clientX - startX));
+        handle.style.left = x + "px";
+        model.mouse.push({ type: "move", trusted: event.isTrusted, x });
+      });
+      document.addEventListener("mouseup", (event) => {
+        if (!model.pressed) return;
+        model.pressed = false;
+        model.mouse.push({ type: "up", trusted: event.isTrusted, x: event.clientX, y: event.clientY, distance: event.clientX - startX });
+        if (event.clientX - startX < distance - (model.strictEnd ? 0 : 1)) {
+          handle.style.left = "0px";
+          return;
+        }
+        if (model.mode === "fail") {
+          document.getElementById("aliyunCaptcha-sliding-text").textContent = "验证失败，请点击重试 E900";
+        } else if (model.mode === "pass") {
+          model.verify();
+        }
+      });
+      const formDelay = Number(params.get("formDelay")) || 0;
+      if (formDelay) setTimeout(model.form, formDelay);
+      else model.form();
+    })();
+  </script>
+</body>
+</html>

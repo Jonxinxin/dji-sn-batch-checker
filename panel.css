@@ -155,8 +155,11 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
 .sn-steps { display: grid; gap: 6px; margin: 10px 0; }
 .sn-step { display: flex; align-items: center; gap: 8px; color: var(--sn-muted); font-size: 12px; line-height: 18px; }
 .sn-step-index { display: inline-grid; width: 20px; height: 20px; flex: 0 0 20px; place-items: center; color: #fff; background: #565c64; border-radius: 50%; font-size: 11px; font-weight: 700; }
-.sn-auto-option { display: inline-flex; align-items: center; gap: 7px; margin: 0 0 10px; color: var(--sn-muted); cursor: pointer; font-size: 12px; line-height: 18px; }
+.sn-auto-option { display: flex; align-items: center; gap: 7px; margin: 0 0 8px; color: var(--sn-muted); cursor: pointer; font-size: 12px; line-height: 18px; }
 .sn-auto-option input { width: 16px; height: 16px; margin: 0; accent-color: var(--sn-primary); cursor: pointer; }
+.sn-verification { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; padding: 8px 10px; color: var(--sn-muted); background: var(--sn-surface); border-radius: 6px; font-size: 12px; line-height: 18px; }
+.sn-verification > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.sn-verification .sn-link-button { flex-shrink: 0; }
 .sn-result { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--sn-border); }
 .sn-result-grid { display: grid; grid-template-columns: 92px 1fr; gap: 5px 10px; font-size: 12px; line-height: 18px; }
 .sn-result-grid dt { color: var(--sn-muted); }
